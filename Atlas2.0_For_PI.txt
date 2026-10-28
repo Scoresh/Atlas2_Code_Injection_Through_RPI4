@@ -1,0 +1,408 @@
+#include <Servo.h>
+#include "HX711.h"
+
+// --- Pin Definitions ---
+#define MINING_PIN 6
+#define LEFT_PIN 7
+#define RIGHT_PIN 8
+
+// Actuators (Relays/Drivers)
+#define D_ACT_POS 52
+#define D_ACT_NEG 53
+#define MINE_RIGHT_POS 43
+#define MINE_RIGHT_NEG 42
+#define MINE_LEFT_POS 27
+#define MINE_LEFT_NEG 26
+#define MINE_LEFT_SPEED 10
+#define MINE_RIGHT_SPEED 12
+/*#define RIGHT_LOADCELL_DATA 13
+#define RIGHT_LOADCELL_CLOCK 7
+#define LEFT_LOADCELL_DATA 3
+#define LEFT_LOADCELL_CLOCK 2*/
+#define LIMIT_SWITCH_1 49
+#define LIMIT_SWITCH_2 44
+
+#define miningSpeed 135
+#define depositSpeed 70
+
+#define RISING_ENCODER_PIN_RIGHT 2 // Must be an interrupt pin (Pin 2 or 3 on Arduino Uno)
+#define RISING_ENCODER_PIN_LEFT 3
+
+
+#define calibration_factor_left -9020.0
+#define calibration_factor_right -12190.0
+
+#define FULL_DRUM 25
+
+// --- Objects & State ---
+Servo leftMotor;
+Servo rightMotor;
+Servo miningMotor;
+
+HX711 leftScale;
+HX711 rightScale;
+
+
+int currentMode = 1; // 1 = MOVE, 2 = TURN
+float currentSpeed = 0; // Ranges from -1.0 to 1.0
+
+volatile long pulseCountRight = 0; 
+volatile long pulseCountLeft = 0;
+volatile unsigned long backwardStartTime = 0; // Tracks when backward movement began
+
+bool isMovingForward = true;
+long lastPulseCountLeft = 0;
+unsigned long lastPulseTime = 0;
+bool mining;
+bool depositing;
+int actuator_pulse_limit = 0;
+
+boolean limit1 = 0;
+boolean limit2 = 0;
+
+void setup() {
+  Serial.begin(115200);
+  currentSpeed = 0;
+  currentMode = 1;
+
+  pulseCountRight = 0; 
+  pulseCountLeft = 0;
+  backwardStartTime = 0; // Tracks when backward movement began
+
+  isMovingForward = true;
+  lastPulseCountLeft = 0;
+  lastPulseTime = 0;
+  mining = false;
+  depositing = true;
+  actuator_pulse_limit = 1800;
+  
+  // Attach SparkMax as Servos
+  leftMotor.attach(LEFT_PIN);
+  rightMotor.attach(RIGHT_PIN);
+  miningMotor.attach(MINING_PIN);
+
+  // Set Actuators
+  pinMode(D_ACT_POS, OUTPUT);
+  pinMode(D_ACT_NEG, OUTPUT);
+  pinMode(MINE_RIGHT_POS, OUTPUT);
+  pinMode(MINE_RIGHT_NEG, OUTPUT);
+  pinMode(MINE_LEFT_POS, OUTPUT);
+  pinMode(MINE_LEFT_NEG, OUTPUT);
+  pinMode(MINE_LEFT_SPEED, OUTPUT);
+  pinMode(MINE_RIGHT_SPEED, OUTPUT);
+  
+  pinMode(LIMIT_SWITCH_1, INPUT);
+  pinMode(LIMIT_SWITCH_2, INPUT);
+  
+  pinMode(RISING_ENCODER_PIN_RIGHT, INPUT_PULLUP);
+  pinMode(RISING_ENCODER_PIN_LEFT, INPUT_PULLUP);
+
+
+  /*if (digitalRead(LIMIT_SWITCH_1)==HIGH || digitalRead(LIMIT_SWITCH_2) == HIGH) {
+    currentMode = 2;
+  }
+  else if (digitalRead(LIMIT_SWITCH_1)==LOW || digitalRead(LIMIT_SWITCH_2) == LOW) {
+    currentMode = 1;
+  }*/
+
+  // Initialize Motors to Neutral (Stop)
+  stopMotors();
+  stopActuators();
+
+  analogWrite(MINE_LEFT_SPEED, 255);
+  analogWrite(MINE_RIGHT_SPEED, 255);
+
+
+  //Initalize load cells
+  /*rightScale.begin(RIGHT_LOADCELL_DATA, RIGHT_LOADCELL_CLOCK);
+  leftScale.begin(LEFT_LOADCELL_DATA, LEFT_LOADCELL_CLOCK);
+  rightScale.set_scale(calibration_factor_right);
+  leftScale.set_scale(calibration_factor_left);
+
+  rightScale.tare();
+  leftScale.tare();*/
+
+  //Initialize interupt
+  attachInterrupt(digitalPinToInterrupt(RISING_ENCODER_PIN_RIGHT), countPulse, RISING);
+  attachInterrupt(digitalPinToInterrupt(RISING_ENCODER_PIN_LEFT), countPulse, RISING);
+
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String data = Serial.readStringUntil('\n');
+    parseCommand(data);
+  }
+}
+
+void parseCommand(String cmd) {
+  if (cmd.startsWith("FORM")) {
+//    int targetMode = cmd.substring(5).toInt();
+//    changeForm(targetMode);
+  }
+  else if (cmd.startsWith("M")) {
+   // if (currentMode == 1) accelerate(cmd.substring(2).toFloat());
+    Serial.println("Moving Straight");
+    straight();
+    accelerate(cmd.substring(2).toFloat());
+   
+  }
+  else if (cmd.startsWith("T")) {
+    //if (currentMode == 2) accelerate(cmd.substring(2).toFloat());
+    Serial.println("Turning");
+    //angleWheels();
+    executePointTurn(cmd.substring(2).toFloat());
+  }
+  else if (cmd.startsWith("L")) {
+    Serial.println("Move drum 1");
+    stopActuators();
+    move_drum(1);
+  }
+  else if (cmd.startsWith("R")) {
+    Serial.println("Move drum 2");
+    stopActuators();
+    move_drum(2);
+  }
+  else if (cmd.startsWith("A")) {
+    Serial.println("Move drum 0");
+    move_drum(0);
+  }
+  else if (cmd.startsWith("D")) {
+    Serial.println("Mining");
+    mining = true;
+    depositing = false;
+    stopMotors();
+    run_drum(1, cmd.substring(2).toFloat());
+  }
+  else if (cmd.startsWith("P")) {
+    Serial.println("Depositing");
+    mining = false;
+    depositing = true;
+    stopMotors();
+    run_drum(2, 1.0);
+  }
+  /*else if (cmd.startsWith("READ")) {
+    if (checkCapacity()) {
+      Serial.println("Full");
+
+    }
+    else {
+      Serial.println("Continue");
+    }
+  }*/
+  else {
+    Serial.println("stopping");
+    stopMotors();
+    run_drum(3, 0);
+    stopActuators();
+  }
+}
+
+// --- Actuator Logic ---
+/*void changeForm(int mode) {
+  if (mode == currentMode) return;
+  stopMotors();
+
+  if (digitalRead(LIMIT_SWITCH_1) == HIGH || digitalRead(LIMIT_SWITCH_2) == HIGH) {
+    digitalWrite(D_ACT_POS, HIGH);
+    digitalWrite(D_ACT_NEG, LOW);
+    delay(7000);
+    stopActuators();
+  } 
+  else {
+    while(digitalRead(LIMIT_SWITCH_1) == LOW || digitalRead(LIMIT_SWITCH_2) == LOW){
+      digitalWrite(D_ACT_POS, LOW);
+      digitalWrite(D_ACT_NEG, HIGH);
+    }
+    stopActuators();
+  }
+  currentMode = mode;
+}*/
+
+void angleWheels(){
+  if(limit1==HIGH || limit2 == HIGH){
+    return;
+  }
+  stopMotors();
+  while(limit1==LOW && limit2 == LOW){
+    digitalWrite(D_ACT_POS,LOW);
+    digitalWrite(D_ACT_NEG,HIGH);
+  }
+  digitalWrite(D_ACT_NEG,LOW);
+  currentMode = 2;
+}
+
+void straight(){
+  if(limit1 ==LOW && limit2 == LOW){
+    return;
+  }
+  stopMotors();
+  digitalWrite(D_ACT_NEG,LOW);
+  digitalWrite(D_ACT_POS,HIGH);
+  delay(10000);
+  digitalWrite(D_ACT_POS,LOW);
+  currentMode = 1;
+}
+
+
+void move_drum(int direction) {
+  if (direction == 0){
+    stopActuators();
+    return;
+  }
+  else if (direction == 1) {
+    if (mining) {
+      actuator_pulse_limit = 1800;
+      analogWrite(MINE_LEFT_SPEED, miningSpeed);
+      analogWrite(MINE_RIGHT_SPEED, miningSpeed);
+    }
+    else if (depositing) {
+      actuator_pulse_limit = 1200;
+      analogWrite(MINE_LEFT_SPEED, depositSpeed);
+      analogWrite(MINE_RIGHT_SPEED, depositSpeed);
+    }
+    isMovingForward = true;
+    digitalWrite(MINE_RIGHT_NEG, LOW);
+    digitalWrite(MINE_LEFT_NEG, LOW);
+    digitalWrite(MINE_RIGHT_POS, HIGH);
+    digitalWrite(MINE_LEFT_POS, HIGH);
+
+    
+
+    lastPulseTime = millis(); 
+
+    noInterrupts();
+    lastPulseCountLeft = pulseCountLeft;
+    interrupts();  
+    while(isActuatorMoving()) {
+      delay(50);
+    }
+    depositing = true;
+    mining = false;
+  }
+  else if (direction == 2) {
+    isMovingForward = false;
+    analogWrite(MINE_RIGHT_SPEED, 255);
+    analogWrite(MINE_LEFT_SPEED, 255);
+    digitalWrite(MINE_RIGHT_POS, LOW);
+    digitalWrite(MINE_LEFT_POS, LOW);
+    digitalWrite(MINE_RIGHT_NEG, HIGH);
+    digitalWrite(MINE_LEFT_NEG, HIGH);
+
+    lastPulseTime = millis(); 
+
+    noInterrupts();
+    lastPulseCountLeft = pulseCountLeft;
+    interrupts();
+    while(isActuatorMoving()) {
+      delay(50);
+    }
+    pulseCountRight = 0; pulseCountLeft = 0;
+  }
+}
+
+void stopActuators() {
+  digitalWrite(D_ACT_POS, LOW);
+  digitalWrite(D_ACT_NEG, LOW);
+  digitalWrite(MINE_RIGHT_POS, LOW);
+  digitalWrite(MINE_RIGHT_NEG, LOW);
+  digitalWrite(MINE_LEFT_POS, LOW);
+  digitalWrite(MINE_LEFT_NEG, LOW);
+}
+
+/*void checkCapacity() {
+  float capacity;
+  capacity = ((rightScale.get_units() + leftScale.get_units()) / 2)
+  Serial.println(capacity);
+}*/
+
+// --- Motor Logic ---
+
+// Converts -1.0 to 1.0 into 0 to 180 for SparkMax
+int mapSpeed(float val) {
+  return map(val * 100, -100, 100, 45,135); // changed because of motor opp. installation
+}
+
+void run_drum(int action, float val) {
+  if (action == 1) miningMotor.write(mapSpeed(val));
+  else if (action == 2) miningMotor.write((180 - mapSpeed(val)));
+  else miningMotor.write(90);
+}
+
+void accelerate(float targetSpeed) {
+  float accelStep = 0.01;
+  
+  while (abs(currentSpeed - targetSpeed) > 0.01) {
+    if (currentSpeed < targetSpeed) currentSpeed += accelStep;
+    else currentSpeed -= accelStep;
+
+    // Clamp speed
+    if (currentSpeed > 1.0) currentSpeed = 1.0;
+    if (currentSpeed < -1.0) currentSpeed = -1.0;
+
+    if (currentMode == 1) executeLinear(currentSpeed);
+    else if (currentMode == 2) executePointTurn(currentSpeed);
+    
+    delay(20);
+  }
+}
+
+void executeLinear(float val) {
+  //stopMotors();
+  int servoVal = mapSpeed(val);
+  leftMotor.write((180 - servoVal));
+  rightMotor.write(servoVal);
+  //adelay(5000);
+}
+
+void executePointTurn(float val) {
+//motors are installed in opposite directions: if both motors at the same value they spin opposite
+  //stopMotors();
+  int leftVal = mapSpeed(val);
+  int rightVal = mapSpeed(val);
+  leftMotor.write((180 - (leftVal)));
+  rightMotor.write((180 - (rightVal)));
+  //delay(5000);
+}
+
+void stopMotors() {
+  currentSpeed = 0;
+  leftMotor.write(90);
+  rightMotor.write(90);
+  miningMotor.write(90);
+}
+
+
+//Interupt function
+void countPulse() {
+  // Counts up if extending, counts down if retracting
+ if (isMovingForward && pulseCountRight < actuator_pulse_limit && pulseCountLeft < actuator_pulse_limit) {
+    pulseCountRight++; pulseCountLeft++;
+
+  } else if (!isMovingForward) {
+    pulseCountRight--; pulseCountLeft--;
+  }
+  if (pulseCountRight >= actuator_pulse_limit || pulseCountLeft >= actuator_pulse_limit) {
+    stopActuators();
+  }
+}
+
+bool isActuatorMoving() {
+  noInterrupts();
+  long currentPulses = pulseCountLeft;
+  interrupts();
+
+  // If the pulse count changed, reset the timer
+  if (currentPulses != lastPulseCountLeft) {
+    lastPulseCountLeft = currentPulses;
+    lastPulseTime = millis();
+    return true; // It is still moving
+  }
+
+  // If it hasn't pulsed in 250ms, it has hit the limit switch and stalled
+  if (millis() - lastPulseTime > 250) {
+    return false; // It stopped moving
+  }
+
+  return true; // It hasn't pulsed yet, but we haven't hit the 250ms timeout either
+}
