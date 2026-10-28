@@ -22,7 +22,7 @@ turns.
 | `Atlas2.0_For_Pi_MovementOnly.ino` | Arduino | Movement-only firmware. Open directly in the Arduino IDE. |
 | `setup_autorun.sh` | Raspberry Pi | Installs dependencies and configures the teleop to auto-run on boot via systemd. |
 | `pair_controller.sh` | Raspberry Pi | One-time helper to pair + trust an Xbox controller over Bluetooth. |
-| `Atlas2.0_For_PI.txt` | Arduino | Original full firmware (mining + driving). Kept for reference; not used by this setup. |
+| `Atlas2.0_Archive.txt` | Arduino | Original full firmware (mining + driving). Kept for reference; not used by this setup. |
 
 ---
 
